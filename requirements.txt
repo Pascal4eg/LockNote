@@ -1,0 +1,3 @@
+cryptography
+python-gnupg
+tkinterdnd2
