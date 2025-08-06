@@ -4,13 +4,27 @@ from tkinter import filedialog, simpledialog, messagebox
 import os
 import tempfile
 import platform
+import shutil
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.backends import default_backend
 import gnupg
 
-gpg = gnupg.GPG()
+def find_gpg_binary():
+    candidates = [
+        "/opt/homebrew/bin/gpg",
+        "/usr/local/bin/gpg",
+        "/usr/bin/gpg",
+        shutil.which("gpg"),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+gpg_path = find_gpg_binary()
+gpg = gnupg.GPG(gpgbinary=gpg_path) if gpg_path else None
 
 # AES-GCM helpers
 def derive_key(password: str, salt: bytes) -> bytes:
@@ -66,6 +80,9 @@ class EncryptedEditorApp:
         self.bind_shortcuts()
         self.bind_drag_and_drop()
         self.update_title()
+
+        if not gpg:
+            self.status.config(text="Warning: GPG not available — .gpg files won't work")
 
     def update_title(self):
         if self.file_info.path:
@@ -126,10 +143,12 @@ class EncryptedEditorApp:
                 try:
                     decrypted = decrypt_data(data, pw)
                     content = decrypted.decode()
-                except Exception as e:
+                except Exception:
                     raise Exception("Decryption error")
                 self.file_info.type = "enc"
             elif path.endswith(".gpg"):
+                if not gpg:
+                    raise Exception("GPG is not available on this system.")
                 with open(path, "rb") as f:
                     result = gpg.decrypt_file(f, passphrase=pw)
                 if not result.ok or not result.data:
@@ -154,6 +173,8 @@ class EncryptedEditorApp:
             with open(path, "wb") as f:
                 f.write(encrypted)
         elif file_type == "gpg":
+            if not gpg:
+                raise Exception("GPG is not available on this system.")
             with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8") as tmp:
                 tmp.write(plaintext)
                 tmp_path = tmp.name
