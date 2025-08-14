@@ -64,11 +64,16 @@ LockNote includes a clean icon featuring a lock and notepad.
 
 ## 🔧 Packaging
 
-You can bundle LockNote using [`pyinstaller`](https://pyinstaller.org/) or other packagers like `py2app` or `nuitka`.
+You can bundle LockNote using [`pyinstaller`](https://pyinstaller.org/) or other packagers like [`py2app`](https://py2app.readthedocs.io/en/latest/) or `nuitka`.
 
 ### Example (Windows):
 ```bash
 pyinstaller --noconsole --onefile --icon=icon.ico LockNote.py
+```
+
+### Example (macOS):
+```bash
+python setup.py py2app
 ```
 
 ---
