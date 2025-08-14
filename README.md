@@ -81,12 +81,6 @@ pyinstaller --noconsole --onefile --icon=icon.ico LockNote.py
 
 ---
 
-## ✅ License
-
-Apache-2.0 License
-
----
-
 ## 🙌 Credits
 
 Built with ❤️ using Python and Tkinter.
