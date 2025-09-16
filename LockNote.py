@@ -1,6 +1,6 @@
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import tkinter as tk
-from tkinter import filedialog, simpledialog, messagebox
+from tkinter import filedialog, messagebox
 import os
 import tempfile
 import platform
@@ -53,6 +53,41 @@ def decrypt_data(data: bytes, password: str) -> bytes:
     aesgcm = AESGCM(key)
     return aesgcm.decrypt(nonce, ciphertext, None)
 
+class PasswordDialog(tk.Toplevel):
+    def __init__(self, parent, title="Password"):
+        super().__init__(parent)
+        self.transient(parent)
+        self.title(title)
+        self.parent = parent
+        self.result = None
+
+        tk.Label(self, text="Enter password:").pack(padx=20, pady=(10, 5))
+
+        self.entry = tk.Entry(self, show='*', width=30)
+        self.entry.pack(padx=20, pady=5)
+        self.entry.focus_set()
+
+        button_frame = tk.Frame(self)
+        button_frame.pack(padx=20, pady=(5, 10))
+
+        tk.Button(button_frame, text="OK", command=self.on_ok, default=tk.ACTIVE).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Cancel", command=self.on_cancel).pack(side=tk.LEFT, padx=5)
+
+        self.bind("<Return>", self.on_ok)
+        self.bind("<Escape>", self.on_cancel)
+
+        self.protocol("WM_DELETE_WINDOW", self.on_cancel)
+        self.geometry(f"+{parent.winfo_rootx()+50}+{parent.winfo_rooty()+50}")
+        self.wait_window(self)
+
+    def on_ok(self, event=None):
+        self.result = self.entry.get()
+        self.destroy()
+
+    def on_cancel(self, event=None):
+        self.result = None
+        self.destroy()
+
 class FileInfo:
     def __init__(self):
         self.path = None
@@ -92,6 +127,9 @@ class EncryptedEditorApp:
 
     def create_menu(self):
         menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+
+        # File Menu
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="New", command=self.new_file, accelerator=f"{self.modifier}+N")
         filemenu.add_command(label="Open file...", command=self.open_file, accelerator=f"{self.modifier}+O")
@@ -100,7 +138,15 @@ class EncryptedEditorApp:
         filemenu.add_separator()
         filemenu.add_command(label="Quit", command=self.root.quit, accelerator=f"{self.modifier}+Q")
         menubar.add_cascade(label="File", menu=filemenu)
-        self.root.config(menu=menubar)
+
+        # Edit Menu
+        editmenu = tk.Menu(menubar, tearoff=0)
+        editmenu.add_command(label="Cut", command=lambda: self.text.event_generate("<<Cut>>"), accelerator=f"{self.modifier}+X")
+        editmenu.add_command(label="Copy", command=lambda: self.text.event_generate("<<Copy>>"), accelerator=f"{self.modifier}+C")
+        editmenu.add_command(label="Paste", command=lambda: self.text.event_generate("<<Paste>>"), accelerator=f"{self.modifier}+V")
+        editmenu.add_separator()
+        editmenu.add_command(label="Select All", command=lambda: self.text.event_generate("<<SelectAll>>"), accelerator=f"{self.modifier}+A")
+        menubar.add_cascade(label="Edit", menu=editmenu)
 
     def bind_shortcuts(self):
         self.root.bind_all(f"<{self.modifier}-n>", lambda e: self.new_file())
@@ -108,6 +154,9 @@ class EncryptedEditorApp:
         self.root.bind_all(f"<{self.modifier}-s>", lambda e: self.save_existing_file())
         self.root.bind_all(f"<{self.modifier}-Shift-S>", lambda e: self.save_file())
         self.root.bind_all(f"<{self.modifier}-q>", lambda e: self.root.quit())
+        # Edit shortcuts (Tkinter handles these by default, but explicit binding can be clearer)
+        self.root.bind_all(f"<{self.modifier}-x>", lambda e: self.text.event_generate("<<Cut>>"))
+        self.root.bind_all(f"<{self.modifier}-a>", lambda e: self.text.event_generate("<<SelectAll>>"))
 
     def bind_drag_and_drop(self):
         self.text.drop_target_register(DND_FILES)
@@ -119,7 +168,8 @@ class EncryptedEditorApp:
             self.root.after(100, lambda: self.open_file_from_path(path))
 
     def ask_password(self):
-        return simpledialog.askstring("Password", "Enter password:", show='*')
+        dialog = PasswordDialog(self.root, title="Enter Password")
+        return dialog.result
 
     def new_file(self):
         self.text.delete("1.0", tk.END)
@@ -164,7 +214,7 @@ class EncryptedEditorApp:
             self.update_title()
             self.status.config(text=f"The file is decrypted: {path}")
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", str(e), parent=self.root)
 
     def encrypt_and_save(self, path, password, file_type):
         plaintext = self.text.get("1.0", tk.END)
@@ -205,7 +255,7 @@ class EncryptedEditorApp:
             try:
                 self.encrypt_and_save(self.file_info.path, pw, self.file_info.type)
             except Exception as e:
-                messagebox.showerror("Error", str(e))
+                messagebox.showerror("Error", str(e), parent=self.root)
         else:
             self.save_file()
 
@@ -222,7 +272,7 @@ class EncryptedEditorApp:
                 raise Exception("Unsupported file extension")
             self.encrypt_and_save(path, pw, file_type)
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", str(e), parent=self.root)
 
 if __name__ == "__main__":
     root = TkinterDnD.Tk()
