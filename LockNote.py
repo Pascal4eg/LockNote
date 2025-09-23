@@ -2,15 +2,11 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import os
-import tempfile
 import platform
 import shutil
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.backends import default_backend
 import gnupg
 from modification_tracker import ModificationTracker
+from file_handler import FileHandler
 
 def find_gpg_binary():
     candidates = [
@@ -26,33 +22,6 @@ def find_gpg_binary():
 
 gpg_path = find_gpg_binary()
 gpg = gnupg.GPG(gpgbinary=gpg_path) if gpg_path else None
-
-# AES-GCM helpers
-def derive_key(password: str, salt: bytes) -> bytes:
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=100_000,
-        backend=default_backend()
-    )
-    return kdf.derive(password.encode())
-
-def encrypt_data(data: bytes, password: str) -> bytes:
-    salt = os.urandom(16)
-    key = derive_key(password, salt)
-    aesgcm = AESGCM(key)
-    nonce = os.urandom(12)
-    ciphertext = aesgcm.encrypt(nonce, data, None)
-    return salt + nonce + ciphertext
-
-def decrypt_data(data: bytes, password: str) -> bytes:
-    salt = data[:16]
-    nonce = data[16:28]
-    ciphertext = data[28:]
-    key = derive_key(password, salt)
-    aesgcm = AESGCM(key)
-    return aesgcm.decrypt(nonce, ciphertext, None)
 
 class PasswordDialog(tk.Toplevel):
     def __init__(self, parent, title="Password"):
@@ -103,8 +72,9 @@ class EncryptedEditorApp:
         self.status = tk.Label(root, text="", anchor="w")
         self.status.pack(fill="x")
 
-        self.mod_tracker = ModificationTracker(self.text.get("1.0", tk.END))
+        self.mod_tracker = ModificationTracker(self.text.get("1.0", "end-1c"))
         self.file_info = FileInfo()
+        self.file_handler = FileHandler(gpg)
 
         self.is_mac = platform.system() == "Darwin"
         self.modifier = "Command" if self.is_mac else "Control"
@@ -112,6 +82,10 @@ class EncryptedEditorApp:
         icon_path = "icon.ico" # or .icns for macOS
         if os.path.exists(icon_path) and not self.is_mac:
             root.iconbitmap(icon_path)
+
+        # Override default Text widget behavior for Undo/Redo
+        self.text.bind_class("Text", "<<Undo>>", self.on_undo_event)
+        self.text.bind_class("Text", "<<Redo>>", self.on_redo_event)
 
         self.create_menu()
         self.bind_shortcuts()
@@ -124,7 +98,6 @@ class EncryptedEditorApp:
             self.status.config(text="Warning: GPG not available — .gpg files won't work")
 
     def update_title(self):
-        print("update_title")
         title = "LockNote"
         if self.file_info.path:
             title = f"LockNote — {os.path.basename(self.file_info.path)}"
@@ -160,22 +133,16 @@ class EncryptedEditorApp:
         menubar.add_cascade(label="Edit", menu=editmenu)
 
     def bind_shortcuts(self):
-        self.root.bind_all(f"<{self.modifier}-n>", lambda e: self.new_file())
-        self.root.bind_all(f"<{self.modifier}-o>", lambda e: self.open_file())
-        self.root.bind_all(f"<{self.modifier}-s>", lambda e: self.save_existing_file())
-        self.root.bind_all(f"<{self.modifier}-Shift-S>", lambda e: self.save_file())
-        self.root.bind_all(f"<{self.modifier}-q>", lambda e: self.root.quit())
-
-        # Undo/Redo shortcuts
-        self.root.bind_all(f"<{self.modifier}-z>", lambda e: self.undo())
-        if self.is_mac:
-            self.root.bind_all(f"<{self.modifier}-Shift-z>", lambda e: self.redo())
-        else:
-            self.root.bind_all(f"<{self.modifier}-y>", lambda e: self.redo())
+        self.root.bind_all(f"<{self.modifier}-n>", lambda e: self.new_file() or "break")
+        self.root.bind_all(f"<{self.modifier}-o>", lambda e: self.open_file() or "break")
+        self.root.bind_all(f"<{self.modifier}-s>", lambda e: self.save_existing_file() or "break")
+        self.root.bind_all(f"<{self.modifier}-Shift-S>", lambda e: self.save_file() or "break")
+        self.root.bind_all(f"<{self.modifier}-q>", lambda e: self.on_closing() or "break")
 
         # Edit shortcuts (Tkinter handles these by default, but explicit binding can be clearer)
-        self.root.bind_all(f"<{self.modifier}-x>", lambda e: self.text.event_generate("<<Cut>>"))
-        self.root.bind_all(f"<{self.modifier}-a>", lambda e: self.text.event_generate("<<SelectAll>>"))
+        # We don't bind undo/redo here to avoid conflicts.
+        self.root.bind_all(f"<{self.modifier}-x>", lambda e: self.text.event_generate("<<Cut>>") or "break")
+        self.root.bind_all(f"<{self.modifier}-a>", lambda e: self.text.event_generate("<<SelectAll>>") or "break")
 
     def bind_drag_and_drop(self):
         self.text.drop_target_register(DND_FILES)
@@ -195,18 +162,32 @@ class EncryptedEditorApp:
 
     def check_modified_status(self):
         was_modified = self.mod_tracker.is_modified()
-        is_modified_now = self.mod_tracker.check(self.text.get("1.0", tk.END))
+        is_modified_now = self.mod_tracker.check(self.text.get("1.0", "end-1c"))
         if was_modified != is_modified_now:
             self.update_title()
 
     def undo(self):
-        self.text.edit_undo()
-        self.check_modified_status()
+        try:
+            self.text.edit_undo()
+            self.check_modified_status()
+        except tk.TclError:
+            pass # Undo stack is empty
 
     def redo(self):
-        self.text.edit_redo()
-        self.check_modified_status()
+        try:
+            self.text.edit_redo()
+            self.check_modified_status()
+        except tk.TclError:
+            pass # Redo stack is empty
 
+    def on_undo_event(self, event):
+        self.undo()
+        return "break"
+
+    def on_redo_event(self, event):
+        self.redo()
+        return "break"
+    
     def on_closing(self):
         if self.prompt_save_if_modified():
             self.root.destroy()
@@ -238,7 +219,7 @@ class EncryptedEditorApp:
             return
 
         self.text.delete("1.0", tk.END)
-        self.mod_tracker.reset(self.text.get("1.0", tk.END))
+        self.mod_tracker.reset(self.text.get("1.0", "end-1c"))
         self.text.edit_modified(False)
         self.file_info = FileInfo()
         self.update_title()
@@ -257,31 +238,13 @@ class EncryptedEditorApp:
         if pw is None:
             return
         try:
-            if path.endswith(".enc"):
-                with open(path, "rb") as f:
-                    data = f.read()
-                try:
-                    decrypted = decrypt_data(data, pw)
-                    content = decrypted.decode()
-                except Exception:
-                    raise Exception("Decryption error")
-                self.file_info.type = "enc"
-            elif path.endswith(".gpg"):
-                if not gpg:
-                    raise Exception("GPG is not available on this system.")
-                with open(path, "rb") as f:
-                    result = gpg.decrypt_file(f, passphrase=pw)
-                if not result.ok or not result.data:
-                    raise Exception(result.status or "Decryption error")
-                content = result.data.decode()
-                self.file_info.type = "gpg"
-            else:
-                raise Exception("Unsupported file format")
+            content, file_type = self.file_handler.read_file(path, pw)
+            self.file_info.type = file_type
 
             self.text.delete("1.0", tk.END)
             self.text.insert(tk.END, content)
 
-            self.mod_tracker.reset(self.text.get("1.0", tk.END))
+            self.mod_tracker.reset(content)
             self.text.edit_modified(False)
             self.file_info.path = path
             self.update_title()
@@ -291,34 +254,11 @@ class EncryptedEditorApp:
             messagebox.showerror("Error", str(e), parent=self.root)
 
     def encrypt_and_save(self, path, password, file_type):
-        plaintext = self.text.get("1.0", tk.END)
-        if file_type == "enc":
-            encrypted = encrypt_data(plaintext.encode(), password)
-            with open(path, "wb") as f:
-                f.write(encrypted)
-        elif file_type == "gpg":
-            if not gpg:
-                raise Exception("GPG is not available on this system.")
-            with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8") as tmp:
-                tmp.write(plaintext)
-                tmp_path = tmp.name
-            with open(tmp_path, "rb") as tmp_file:
-                result = gpg.encrypt_file(
-                    tmp_file,
-                    recipients=None,
-                    symmetric='AES256',
-                    passphrase=password,
-                    output=path
-                )
-            os.unlink(tmp_path)
-            if not result.ok:
-                raise Exception(result.status)
-        else:
-            raise Exception("Unknown file type")
-
+        plaintext = self.text.get("1.0", "end-1c")
+        self.file_handler.write_file(path, plaintext, password)
         self.file_info.path = path
         self.file_info.type = file_type
-        self.mod_tracker.reset(self.text.get("1.0", tk.END))
+        self.mod_tracker.reset(self.text.get("1.0", "end-1c"))
         self.text.edit_modified(False)
         self.update_title()
         self.status.config(text=f"The file is saved: {path}")
