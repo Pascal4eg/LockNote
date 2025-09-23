@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.backends import default_backend
 import gnupg
+from modification_tracker import ModificationTracker
 
 def find_gpg_binary():
     candidates = [
@@ -96,12 +97,13 @@ class FileInfo:
 class EncryptedEditorApp:
     def __init__(self, root):
         self.root = root
-        self.text = tk.Text(root, wrap="word")
+        self.text = tk.Text(root, wrap="word", undo=True)
         self.text.pack(expand=True, fill="both")
 
         self.status = tk.Label(root, text="", anchor="w")
         self.status.pack(fill="x")
 
+        self.mod_tracker = ModificationTracker(self.text.get("1.0", tk.END))
         self.file_info = FileInfo()
 
         self.is_mac = platform.system() == "Darwin"
@@ -114,16 +116,21 @@ class EncryptedEditorApp:
         self.create_menu()
         self.bind_shortcuts()
         self.bind_drag_and_drop()
+        self.text.bind("<<Modified>>", self.on_text_modified)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.update_title()
 
         if not gpg:
             self.status.config(text="Warning: GPG not available — .gpg files won't work")
 
     def update_title(self):
+        print("update_title")
+        title = "LockNote"
         if self.file_info.path:
-            self.root.title(f"LockNote — {os.path.basename(self.file_info.path)}")
-        else:
-            self.root.title("LockNote")
+            title = f"LockNote — {os.path.basename(self.file_info.path)}"
+        if self.mod_tracker.is_modified():
+            title += " *"
+        self.root.title(title)
 
     def create_menu(self):
         menubar = tk.Menu(self.root)
@@ -141,6 +148,10 @@ class EncryptedEditorApp:
 
         # Edit Menu
         editmenu = tk.Menu(menubar, tearoff=0)
+        redo_accelerator = f"{self.modifier}+Shift+Z" if self.is_mac else f"{self.modifier}+Y"
+        editmenu.add_command(label="Undo", command=self.undo, accelerator=f"{self.modifier}+Z")
+        editmenu.add_command(label="Redo", command=self.redo, accelerator=redo_accelerator)
+        editmenu.add_separator()
         editmenu.add_command(label="Cut", command=lambda: self.text.event_generate("<<Cut>>"), accelerator=f"{self.modifier}+X")
         editmenu.add_command(label="Copy", command=lambda: self.text.event_generate("<<Copy>>"), accelerator=f"{self.modifier}+C")
         editmenu.add_command(label="Paste", command=lambda: self.text.event_generate("<<Paste>>"), accelerator=f"{self.modifier}+V")
@@ -154,6 +165,14 @@ class EncryptedEditorApp:
         self.root.bind_all(f"<{self.modifier}-s>", lambda e: self.save_existing_file())
         self.root.bind_all(f"<{self.modifier}-Shift-S>", lambda e: self.save_file())
         self.root.bind_all(f"<{self.modifier}-q>", lambda e: self.root.quit())
+
+        # Undo/Redo shortcuts
+        self.root.bind_all(f"<{self.modifier}-z>", lambda e: self.undo())
+        if self.is_mac:
+            self.root.bind_all(f"<{self.modifier}-Shift-z>", lambda e: self.redo())
+        else:
+            self.root.bind_all(f"<{self.modifier}-y>", lambda e: self.redo())
+
         # Edit shortcuts (Tkinter handles these by default, but explicit binding can be clearer)
         self.root.bind_all(f"<{self.modifier}-x>", lambda e: self.text.event_generate("<<Cut>>"))
         self.root.bind_all(f"<{self.modifier}-a>", lambda e: self.text.event_generate("<<SelectAll>>"))
@@ -167,17 +186,68 @@ class EncryptedEditorApp:
         if os.path.isfile(path):
             self.root.after(100, lambda: self.open_file_from_path(path))
 
+    def on_text_modified(self, event=None):
+        # This flag is set by Tkinter's undo/redo stack.
+        # We use it to trigger our own, more robust check.
+        if self.text.edit_modified():
+            self.check_modified_status()
+            self.text.edit_modified(False)  # Reset internal flag
+
+    def check_modified_status(self):
+        was_modified = self.mod_tracker.is_modified()
+        is_modified_now = self.mod_tracker.check(self.text.get("1.0", tk.END))
+        if was_modified != is_modified_now:
+            self.update_title()
+
+    def undo(self):
+        self.text.edit_undo()
+        self.check_modified_status()
+
+    def redo(self):
+        self.text.edit_redo()
+        self.check_modified_status()
+
+    def on_closing(self):
+        if self.prompt_save_if_modified():
+            self.root.destroy()
+
     def ask_password(self):
         dialog = PasswordDialog(self.root, title="Enter Password")
         return dialog.result
 
+    def prompt_save_if_modified(self):
+        if not self.mod_tracker.is_modified():
+            return True  # Continue action
+
+        response = messagebox.askyesnocancel(
+            "Save Changes?",
+            "You have unsaved changes. Do you want to save them before proceeding?",
+            parent=self.root
+        )
+
+        if response is True:  # Yes
+            self.save_existing_file()
+            return not self.mod_tracker.is_modified() # Continue if save was successful
+        elif response is False:  # No
+            return True # Continue without saving
+        else:  # Cancel
+            return False # Abort action
+
     def new_file(self):
+        if not self.prompt_save_if_modified():
+            return
+
         self.text.delete("1.0", tk.END)
+        self.mod_tracker.reset(self.text.get("1.0", tk.END))
+        self.text.edit_modified(False)
         self.file_info = FileInfo()
         self.update_title()
         self.status.config(text="New file")
+        self.text.edit_reset() # Clear undo/redo stack
 
     def open_file(self):
+        if not self.prompt_save_if_modified():
+            return
         path = filedialog.askopenfilename(filetypes=[("Encrypted files", "*.enc *.gpg")])
         if path:
             self.open_file_from_path(path)
@@ -210,9 +280,13 @@ class EncryptedEditorApp:
 
             self.text.delete("1.0", tk.END)
             self.text.insert(tk.END, content)
+
+            self.mod_tracker.reset(self.text.get("1.0", tk.END))
+            self.text.edit_modified(False)
             self.file_info.path = path
             self.update_title()
             self.status.config(text=f"The file is decrypted: {path}")
+            self.text.edit_reset() # Clear undo/redo stack
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self.root)
 
@@ -244,6 +318,8 @@ class EncryptedEditorApp:
 
         self.file_info.path = path
         self.file_info.type = file_type
+        self.mod_tracker.reset(self.text.get("1.0", tk.END))
+        self.text.edit_modified(False)
         self.update_title()
         self.status.config(text=f"The file is saved: {path}")
 
