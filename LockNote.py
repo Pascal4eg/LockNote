@@ -3,25 +3,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import os
 import platform
-import shutil
 import gnupg
 from modification_tracker import ModificationTracker
 from file_handler import FileHandler
-
-def find_gpg_binary():
-    candidates = [
-        "/opt/homebrew/bin/gpg",
-        "/usr/local/bin/gpg",
-        "/usr/bin/gpg",
-        shutil.which("gpg"),
-    ]
-    for path in candidates:
-        if path and os.path.exists(path):
-            return path
-    return None
-
-gpg_path = find_gpg_binary()
-gpg = gnupg.GPG(gpgbinary=gpg_path) if gpg_path else None
+from utils import handle_errors, find_gpg_binary, FileInfo
 
 class PasswordDialog(tk.Toplevel):
     def __init__(self, parent, title="Password"):
@@ -58,23 +43,21 @@ class PasswordDialog(tk.Toplevel):
         self.result = None
         self.destroy()
 
-class FileInfo:
-    def __init__(self):
-        self.path = None
-        self.type = None  # "enc" or "gpg"
-
 class EncryptedEditorApp:
     def __init__(self, root):
         self.root = root
         self.text = tk.Text(root, wrap="word", undo=True)
         self.text.pack(expand=True, fill="both")
 
+        gpg_path = find_gpg_binary()
+        self.gpg = gnupg.GPG(gpgbinary=gpg_path) if gpg_path else None
+
         self.status = tk.Label(root, text="", anchor="w")
         self.status.pack(fill="x")
 
         self.mod_tracker = ModificationTracker(self.text.get("1.0", "end-1c"))
         self.file_info = FileInfo()
-        self.file_handler = FileHandler(gpg)
+        self.file_handler = FileHandler(self.gpg)
 
         self.is_mac = platform.system() == "Darwin"
         self.modifier = "Command" if self.is_mac else "Control"
@@ -94,7 +77,7 @@ class EncryptedEditorApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.update_title()
 
-        if not gpg:
+        if not self.gpg:
             self.status.config(text="Warning: GPG not available — .gpg files won't work")
 
     def update_title(self):
@@ -116,7 +99,7 @@ class EncryptedEditorApp:
         filemenu.add_command(label="Save", command=self.save_existing_file, accelerator=f"{self.modifier}+S")
         filemenu.add_command(label="Save As...", command=self.save_file, accelerator=f"{self.modifier}+Shift+S")
         filemenu.add_separator()
-        filemenu.add_command(label="Quit", command=self.root.quit, accelerator=f"{self.modifier}+Q")
+        filemenu.add_command(label="Quit", command=self.on_closing, accelerator=f"{self.modifier}+Q")
         menubar.add_cascade(label="File", menu=filemenu)
 
         # Edit Menu
@@ -137,12 +120,20 @@ class EncryptedEditorApp:
         self.root.bind_all(f"<{self.modifier}-o>", lambda e: self.open_file() or "break")
         self.root.bind_all(f"<{self.modifier}-s>", lambda e: self.save_existing_file() or "break")
         self.root.bind_all(f"<{self.modifier}-Shift-S>", lambda e: self.save_file() or "break")
-        self.root.bind_all(f"<{self.modifier}-q>", lambda e: self.on_closing() or "break")
-
+        
         # Edit shortcuts (Tkinter handles these by default, but explicit binding can be clearer)
         # We don't bind undo/redo here to avoid conflicts.
         self.root.bind_all(f"<{self.modifier}-x>", lambda e: self.text.event_generate("<<Cut>>") or "break")
         self.root.bind_all(f"<{self.modifier}-a>", lambda e: self.text.event_generate("<<SelectAll>>") or "break")
+
+        # Explicitly bind Redo on macOS to handle Shift key correctly
+        if self.is_mac:
+            self.root.bind_all(f"<{self.modifier}-Shift-Z>", lambda e: self.redo() or "break")
+            self.root.bind_all(f"<{self.modifier}-Shift-z>", lambda e: self.redo() or "break")
+
+        # Explicitly handle Command-Q on macOS to ensure our on_closing logic is called
+        if self.is_mac:
+            self.root.createcommand('tk::mac::Quit', self.on_closing)
 
     def bind_drag_and_drop(self):
         self.text.drop_target_register(DND_FILES)
@@ -233,25 +224,25 @@ class EncryptedEditorApp:
         if path:
             self.open_file_from_path(path)
 
+    @handle_errors
     def open_file_from_path(self, path):
         pw = self.ask_password()
         if pw is None:
             return
-        try:
-            content, file_type = self.file_handler.read_file(path, pw)
-            self.file_info.type = file_type
+        
+        content, file_type = self.file_handler.read_file(path, pw)
+        self.file_info.type = file_type
 
-            self.text.delete("1.0", tk.END)
-            self.text.insert(tk.END, content)
+        self.text.delete("1.0", tk.END)
+        self.text.insert(tk.END, content)
 
-            self.mod_tracker.reset(content)
-            self.text.edit_modified(False)
-            self.file_info.path = path
-            self.update_title()
-            self.status.config(text=f"The file is decrypted: {path}")
-            self.text.edit_reset() # Clear undo/redo stack
-        except Exception as e:
-            messagebox.showerror("Error", str(e), parent=self.root)
+        self.mod_tracker.reset(content)
+        self.text.edit_modified(False)
+        self.file_info.path = path
+        self.update_title()
+        self.status.config(text=f"The file is decrypted: {path}")
+        self.text.edit_reset() # Clear undo/redo stack
+
 
     def encrypt_and_save(self, path, password, file_type):
         plaintext = self.text.get("1.0", "end-1c")
@@ -263,18 +254,17 @@ class EncryptedEditorApp:
         self.update_title()
         self.status.config(text=f"The file is saved: {path}")
 
+    @handle_errors
     def save_existing_file(self):
         if self.file_info.path:
             pw = self.ask_password()
             if pw is None:
                 return
-            try:
-                self.encrypt_and_save(self.file_info.path, pw, self.file_info.type)
-            except Exception as e:
-                messagebox.showerror("Error", str(e), parent=self.root)
+            self.encrypt_and_save(self.file_info.path, pw, self.file_info.type)
         else:
             self.save_file()
 
+    @handle_errors
     def save_file(self):
         path = filedialog.asksaveasfilename(filetypes=[("Encrypted .enc", "*.enc"), ("Encrypted .gpg", "*.gpg")], defaultextension=".enc")
         if not path:
@@ -282,13 +272,10 @@ class EncryptedEditorApp:
         pw = self.ask_password()
         if pw is None:
             return
-        try:
-            file_type = "enc" if path.endswith(".enc") else "gpg" if path.endswith(".gpg") else None
-            if not file_type:
-                raise Exception("Unsupported file extension")
-            self.encrypt_and_save(path, pw, file_type)
-        except Exception as e:
-            messagebox.showerror("Error", str(e), parent=self.root)
+        file_type = "enc" if path.endswith(".enc") else "gpg" if path.endswith(".gpg") else None
+        if not file_type:
+            raise Exception("Unsupported file extension")
+        self.encrypt_and_save(path, pw, file_type)
 
 if __name__ == "__main__":
     root = TkinterDnD.Tk()
